@@ -1,0 +1,4 @@
+{{ ansible_managed | comment }}
+# Local DERP map, referenced from headscale.yaml derp.paths.
+regions:
+{{ item.regions | to_nice_yaml(indent=2) | indent(2, True) }}

@@ -1,0 +1,61 @@
+---
+- name: Ensure headscale-admin group exists
+  ansible.builtin.group:
+    name: "{{ headscale_admin_group }}"
+    system: true
+  when: headscale_admin_group != "root"
+
+- name: Ensure headscale-admin user exists
+  ansible.builtin.user:
+    name: "{{ headscale_admin_user }}"
+    group: "{{ headscale_admin_group }}"
+    home: "{{ headscale_admin_home }}"
+    create_home: false
+    system: true
+    shell: "/sbin/nologin"
+  when: headscale_admin_user != "root"
+
+- name: Ensure home directory exists
+  ansible.builtin.file:
+    path: "{{ headscale_admin_home }}"
+    state: directory
+    owner: "{{ headscale_admin_user }}"
+    group: "{{ headscale_admin_group }}"
+    mode: "0750"
+
+- name: Ensure bin directory exists
+  ansible.builtin.file:
+    path: "{{ headscale_admin_bin_dir }}"
+    state: directory
+    owner: "{{ headscale_admin_user }}"
+    group: "{{ headscale_admin_group }}"
+    mode: "0750"
+
+- name: Ensure work directory exists
+  ansible.builtin.file:
+    path: "{{ headscale_admin_work_dir }}"
+    state: directory
+    owner: "{{ headscale_admin_user }}"
+    group: "{{ headscale_admin_group }}"
+    mode: "0750"
+
+- name: Ensure log directory exists
+  ansible.builtin.file:
+    path: "{{ headscale_admin_log_dir }}"
+    state: directory
+    owner: "{{ headscale_admin_user }}"
+    group: "{{ headscale_admin_group }}"
+    mode: "0750"
+
+- name: Install headscale-admin binary
+  ansible.builtin.import_tasks: install.yaml
+
+- name: Configure headscale-admin
+  ansible.builtin.import_tasks: config.yaml
+
+- name: Pre-configure managed headscale (config only)
+  ansible.builtin.import_tasks: headscale.yaml
+  when: headscale_preconfigure | bool
+
+- name: Set up systemd service and logrotate
+  ansible.builtin.import_tasks: systemd.yaml

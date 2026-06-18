@@ -1,0 +1,7 @@
+---
+- name: Restart headscale-admin
+  ansible.builtin.systemd:
+    name: "{{ headscale_admin_service_name }}"
+    state: restarted
+    daemon_reload: true
+  when: not ansible_check_mode

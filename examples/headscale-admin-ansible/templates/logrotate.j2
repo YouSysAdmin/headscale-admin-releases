@@ -1,0 +1,13 @@
+{{ ansible_managed | comment }}
+{{ headscale_admin_log_dir }}/*.log {
+    {{ headscale_admin_logrotate_frequency }}
+    rotate {{ headscale_admin_logrotate_rotate }}
+    missingok
+    notifempty
+    compress
+    delaycompress
+    # headscale-admin holds the log file open in append mode and does not
+    # reopen on SIGHUP, so rotate by truncating in place.
+    copytruncate
+    su {{ headscale_admin_user }} {{ headscale_admin_group }}
+}

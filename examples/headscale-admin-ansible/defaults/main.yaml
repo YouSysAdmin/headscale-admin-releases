@@ -1,0 +1,372 @@
+---
+###############################################################################
+# headscale-admin - install
+###############################################################################
+# headscale-admin is a single binary that serves the admin UI AND supervises a
+# managed headscale (it downloads the pinned headscale release itself, then
+# generates and owns headscale.yaml + the sqlite DB / keys under its work_dir).
+# This role therefore only installs the *headscale-admin* binary - headscale is
+# managed by headscale-admin at runtime, not by Ansible.
+
+# Where to get the headscale-admin binary from:
+#   github -> a juanfont-style GitHub release of headscale_admin_repo
+#   url    -> a direct download (headscale_admin_download_url)
+#   s3     -> an object in S3 (requires the amazon.aws collection)
+headscale_admin_install_source: "github"
+
+# source: github -------------------------------------------------------
+# Release to install: "latest" OR a tag like "v0.3.0".
+headscale_admin_version: "latest"
+headscale_admin_repo: "YouSysAdmin/headscale-admin"
+# Optional GitHub token (raises the API rate limit / private repos).
+headscale_admin_github_token: ""
+
+# source: url -----------------------------------------------------------
+# Full URL to the raw binary (or a .tar.gz/.zip containing it). You may
+# reference {{ headscale_admin_os }} / {{ headscale_admin_arch }} here.
+headscale_admin_download_url: ""
+
+# source: s3 ------------------------------------------------------------
+headscale_admin_s3_bucket: ""
+headscale_admin_s3_object: ""
+headscale_admin_s3_region: ""
+# Optional explicit S3 endpoint (MinIO etc.). Credentials come from the
+# environment / instance profile, as usual for amazon.aws.
+headscale_admin_s3_endpoint_url: ""
+
+# integrity (all sources) ----------------------------------------------
+# Explicit expected SHA-256 of the downloaded artifact (lower-case hex). Wins
+# over any checksums file. Leave empty to skip / auto-detect.
+headscale_admin_sha256: ""
+# For the github source, the checksums asset to parse if present. The project's
+# GoReleaser config names it "checksums.sha256".
+headscale_admin_checksums_asset: "checksums.sha256"
+# Fail the run if no checksum could be determined for the artifact.
+headscale_admin_checksum_required: false
+
+###############################################################################
+# headscale-admin - paths, user, service
+###############################################################################
+headscale_admin_user: "headscale-admin"
+headscale_admin_group: "headscale-admin"
+
+# Layout under home:
+#   <home>/config.yaml          headscale-admin config
+#   <home>/env                  HSA_* secrets / overrides
+#   <home>/bin/                 all binaries (bin_dir)
+#   <home>/data/                managed headscale state (work_dir)
+headscale_admin_home: "/opt/headscale-admin"
+headscale_admin_binary_name: "headscale-admin"
+# All binaries live together under bin/: the headscale-admin binary installed by
+# this role, plus the headscale and headscale-pf releases headscale-admin
+# downloads at runtime (headscale.bin_dir).
+headscale_admin_bin_dir: "{{ headscale_admin_home }}/bin"
+headscale_admin_binary_path: "{{ headscale_admin_bin_dir }}/{{ headscale_admin_binary_name }}"
+headscale_admin_config_file: "{{ headscale_admin_home }}/config.yaml"
+headscale_admin_env_file: "{{ headscale_admin_home }}/env"
+
+# Managed headscale state (config, sqlite DB, keys, socket) - this is
+# headscale.work_dir. Downloaded binaries live in bin_dir above, not here.
+headscale_admin_work_dir: "{{ headscale_admin_home }}/data"
+
+# Logs. headscale-admin appends to a single file (logging.output); the
+# supervised headscale's output is folded into the same stream.
+headscale_admin_log_dir: "/var/log/headscale-admin"
+headscale_admin_log_file: "{{ headscale_admin_log_dir }}/headscale-admin.log"
+
+# systemd
+headscale_admin_service_name: "headscale-admin"
+# Bind low ports (:80/:443) without root, e.g. tls.mode acme/manual on :443.
+headscale_admin_bind_privileged_ports: true
+
+# logrotate (copytruncate: headscale-admin keeps the log file open in append
+# mode and does not reopen on SIGHUP, so the file must be truncated in place).
+headscale_admin_logrotate_enabled: true
+headscale_admin_logrotate_frequency: "daily"
+headscale_admin_logrotate_rotate: 14
+
+###############################################################################
+# headscale-admin - config.yaml (server / headscale / auth / logging)
+###############################################################################
+# Mirrors the structure consumed by internal/core/env. Secrets are NOT written
+# here - they go to the env file as HSA_* overrides (see "secrets" below).
+
+# server.addr - the single public listener (the "front"). It terminates TLS and
+# proxies /admin/* to the UI and everything else to the supervised headscale.
+# Use ":443" with tls.mode acme/manual/self in production.
+headscale_admin_server_addr: ":8080"
+
+# Where headscale-admin keeps its own state (the bbolt audit log etc.). Kept out
+# of work_dir on purpose - that dir is headscale's data only. Empty -> admin.db
+# in the working directory.
+headscale_admin_db_path: "{{ headscale_admin_home }}/admin.db"
+
+# Trust X-Forwarded-* from these proxies (CIDRs) so the real client IP is used.
+headscale_admin_trusted_proxies: []
+# Restrict the admin UI + API (/admin/*) to these client IPs/CIDRs. Empty -> open.
+# /healthz always stays open for monitoring.
+headscale_admin_ui_allow_ips: []
+# Restrict the proxied headscale gRPC API (only meaningful with expose_grpc).
+headscale_admin_grpc_allow_ips: []
+
+# Keep the device-onboarding signup page (/admin/signup) + its static assets
+# public even when ui_allow_ips is set, so anyone can connect a device while the
+# rest of the admin UI + API stays IP-restricted. No effect without ui_allow_ips.
+headscale_admin_public_signup: false
+
+# Set true when an external proxy terminates TLS in front of this server (with
+# tls.mode none). It marks session cookies Secure and emits HSTS even though
+# this hop is plain HTTP. Pair it with trusted_proxies; leave false otherwise.
+headscale_admin_behind_tls_proxy: false
+
+# server.root - what the bare public root "/" serves. Leave mode empty to keep
+# the default (302 redirect to the signup page). Modes: redirect | page.
+#   redirect: target = signup | signin | dashboard | /path | https://external/url
+#   page:     serve body inline with a status code (and content_type)
+headscale_admin_root_mode: ""            # "" (default) | redirect | page
+headscale_admin_root_target: ""          # redirect target; empty -> signup
+headscale_admin_root_status: ""          # redirect 3xx (def 302) | page code (def 200)
+headscale_admin_root_body: ""            # page body (empty allowed)
+headscale_admin_root_content_type: ""    # page content type; empty -> text/plain
+
+# TLS on the front. Modes: none | manual | self | acme
+headscale_admin_tls_mode: "none"
+# manual:
+headscale_admin_tls_cert: ""
+headscale_admin_tls_key: ""
+# self:
+headscale_admin_tls_fqdn: ""
+headscale_admin_tls_alg: ""            # rsa | ed25519
+# acme (Let's Encrypt via autocert):
+headscale_admin_tls_acme_email: ""
+headscale_admin_tls_acme_cache_dir: "{{ headscale_admin_work_dir }}/certs"
+headscale_admin_tls_acme_http_addr: ":80"
+headscale_admin_tls_acme_hosts: []
+
+# headscale (as seen by headscale-admin).
+# Client-facing control-server URL -> becomes headscale's server_url and the
+# UI "connect" command. Clients reach headscale through it.
+headscale_admin_public_url: ""
+# headscale release to run. Empty -> the version headscale-admin is built
+# against (changing it risks gRPC proto skew).
+headscale_admin_headscale_version: ""
+# Run a specific headscale binary instead of downloading one (air-gapped).
+headscale_admin_headscale_binary: ""
+# Proxy headscale's gRPC management API through the public front.
+headscale_admin_expose_grpc: false
+# Per-request gRPC deadline over the local socket.
+headscale_admin_request_timeout: "10s"
+
+# headscale-pf (external-user sync) ------------------------------------
+# Optional. When enabled, headscale-admin downloads the pinned headscale-pf
+# release (into bin_dir) and the "User sync" page fills the policy's group:
+# members from an external identity source. Secrets (the source token, LDAP
+# bind password) go to the env file as HSA_HEADSCALE_PF_* (see "secrets" below),
+# never to config.yaml.
+headscale_admin_pf_enabled: false
+# Release tag to run (e.g. "v3.0.1"). Empty -> the pinned default. No proto
+# coupling, so it can be pinned/updated freely (also from the UI).
+headscale_admin_pf_version: ""
+# Run a specific headscale-pf binary instead of downloading one (air-gapped).
+headscale_admin_pf_binary: ""
+# Identity source: jc|jumpcloud, ak|authentik, ldap|ldaps, kk|keycloak.
+headscale_admin_pf_source: ""
+# Provider endpoint. Required for ak/kk/ldap; Jumpcloud uses its hosted API.
+headscale_admin_pf_endpoint: ""
+# Skip TLS verification for HTTPS / LDAPS / StartTLS sources.
+headscale_admin_pf_insecure_skip_tls_verify: false
+# LDAP-only settings.
+headscale_admin_pf_ldap_base_dn: ""
+headscale_admin_pf_ldap_bind_dn: ""
+headscale_admin_pf_ldap_default_email_domain: ""
+# Keycloak-only setting.
+headscale_admin_pf_keycloak_realm: ""
+
+# auth
+# Set true to bypass login entirely (everyone is "admin"). NOT for production.
+headscale_admin_auth_disabled: false
+# Cookie lifetime. Empty -> 12h.
+headscale_admin_session_ttl: "12h"
+
+# auth.oidc (non-secret parts live in config.yaml; client_secret -> env file)
+headscale_admin_oidc_enabled: false
+# Login-button label ("Sign in with <label>"). Empty -> the issuer host is used.
+headscale_admin_oidc_label: ""
+headscale_admin_oidc_issuer: ""
+headscale_admin_oidc_client_id: ""
+# e.g. https://hs.example.com/admin/api/auth/oidc/callback
+headscale_admin_oidc_redirect_url: ""
+headscale_admin_oidc_scopes: ["openid", "email", "profile"]
+headscale_admin_oidc_require_email_verified: true
+headscale_admin_oidc_allowed_domains: []
+headscale_admin_oidc_allowed_emails: []
+headscale_admin_oidc_groups_claim: ""
+
+# RBAC role mapping (admin = full; operator = tailnet/network-access config only
+# - no audit log, backups, config, or version updates). The matched role is
+# re-applied on every login (IdP groups are the source of truth). Precedence:
+# admin_emails -> admin_groups -> operator_groups -> default_role; highest
+# privilege wins. These ALSO drive admission (there is no separate
+# allowed_groups): a user may sign in if they match allowed_emails, admin_emails,
+# allowed_domains, OR any admin_groups/operator_groups entry. admin_emails also
+# PIN those users to admin, so they double as the bootstrap admins under OIDC.
+# default_role is the fallback when no rule above matched. "none" (the default)
+# DENIES such a user - so someone admitted by allowed_emails/allowed_domains but
+# in no admin/operator group is refused. Set "operator"/"admin" to grant instead.
+headscale_admin_oidc_admin_emails: []        # always admin (and pinned)
+headscale_admin_oidc_admin_groups: []        # -> admin    (requires groups_claim)
+headscale_admin_oidc_operator_groups: []     # -> operator (requires groups_claim)
+headscale_admin_oidc_default_role: "none"    # "none" -> deny if no rule matched; or "operator"/"admin"
+
+# logging
+headscale_admin_log_level: "info"      # debug | info | warn | error
+headscale_admin_log_format: "json"     # json | text
+headscale_admin_log_color: false
+# Where logs go. "stdout" sends them to the journal; a file path enables the
+# logrotate config above. Defaults to the role's log file.
+headscale_admin_log_output: "{{ headscale_admin_log_file }}"
+
+###############################################################################
+# Secrets -> env file (HSA_* overrides, never written to config.yaml)
+###############################################################################
+# HMAC secret signing the session cookie. REQUIRED when auth is enabled
+# (>= 32 chars). Generate with: openssl rand -hex 32
+headscale_admin_session_secret: ""
+# Login is per-user: email+password when OIDC is off, OIDC otherwise. With auth
+# enabled the server refuses to start until an admin exists - create the first
+# one out-of-band
+# after install (the role does not do this, as it needs an interactive password
+# when OIDC is off):
+#   headscale-admin admin create --config {{ headscale_admin_config_file }}
+# When OIDC is enabled, list the bootstrap admins in
+# headscale_admin_oidc_admin_emails instead (no password needed).
+# OIDC client secret (required when OIDC is enabled).
+headscale_admin_oidc_client_secret: ""
+# headscale-pf source API token (Jumpcloud / Authentik / Keycloak).
+# -> HSA_HEADSCALE_PF_TOKEN
+headscale_admin_pf_token: ""
+# headscale-pf LDAP bind password (ldap source).
+# -> HSA_HEADSCALE_PF_LDAP_BIND_PASSWORD
+headscale_admin_pf_ldap_bind_password: ""
+
+# Alternative to the two secrets above: read them from a file on the host (e.g. a
+# systemd credential or mounted secret) instead of the env file. When set, the
+# matching env var above is NOT written (the config keys are mutually exclusive).
+# -> headscale_pf.token_file / headscale_pf.ldap.bind_password_file
+headscale_admin_pf_token_file: ""
+headscale_admin_pf_ldap_bind_password_file: ""
+
+# Extra raw KEY: value pairs appended to the env file (e.g. HTTP(S)_PROXY).
+headscale_admin_extra_env: {}
+
+###############################################################################
+# Managed headscale - OPTIONAL pre-configuration (config only)
+###############################################################################
+# headscale-admin generates headscale.yaml on first run and then owns it (the
+# Settings UI edits it in place). Enable this to instead pre-seed that file
+# from Ansible. The binary is still downloaded/supervised by headscale-admin -
+# this only writes config.
+headscale_preconfigure: false
+# When false, the rendered headscale.yaml is written only if it does not exist
+# yet (so a later UI/manual edit is preserved). Set true to let Ansible own it.
+headscale_preconfigure_force: false
+
+# the headscale.yaml knobs (used only when headscale_preconfigure) -------
+# headscale-admin is the public edge and terminates TLS, so headscale stays on
+# loopback with no TLS of its own. These defaults match what headscale-admin
+# generates; change the DNS/DERP/policy knobs, not the listeners, unless you
+# know what you are doing.
+headscale_listen_addr: "127.0.0.1:8080"
+headscale_metrics_listen_addr: "127.0.0.1:9090"
+headscale_grpc_listen_addr: "127.0.0.1:50443"
+
+# Private keys. By default headscale generates these on first start. To pin a
+# specific identity (e.g. to keep it across reinstalls), put the key contents
+# in the *_key vars and the role writes them to the *_path files (0600) that
+# headscale.yaml references.
+headscale_noise_private_key: ""
+headscale_noise_private_key_path: "{{ headscale_admin_work_dir }}/noise_private.key"
+
+# IP allocation
+headscale_prefix_v4: "100.64.0.0/10"
+headscale_prefix_v6: "fd7a:115c:a1e0::/48"
+headscale_prefix_allocation: "sequential"   # sequential | random
+
+headscale_disable_check_updates: true        # headscale-admin pins the version
+headscale_ephemeral_node_inactivity_timeout: "30m"
+# Default node expiry (headscale 0.29 `node.expiry`, which replaced the removed
+# `oidc.expiry`). Duration like "180d", or 0 for no default expiry. Applies to
+# all nodes now, not only OIDC-authenticated ones.
+headscale_node_expiry: "180d"
+headscale_logtail_enabled: false
+# `randomize_client_port` was removed in headscale 0.29; randomization now lives
+# in the ACL policy ("randomizeClientPort": true, or a per-node nodeAttrs entry).
+
+# DERP
+headscale_derp_enabled: false
+headscale_derp_region_id: 999
+headscale_derp_region_code: "headscale"
+headscale_derp_region_name: "Headscale Embedded DERP"
+headscale_derp_verify_clients: true
+headscale_derp_stun_listen_addr: "0.0.0.0:3478"
+headscale_derp_ipv4: ""
+headscale_derp_ipv6: ""
+# Embedded-DERP private key (only used when headscale_derp_enabled). Same
+# pinning pattern as the Noise key above; otherwise auto-generated.
+headscale_derp_private_key: ""
+headscale_derp_private_key_path: "{{ headscale_admin_work_dir }}/derp_server_private.key"
+headscale_derp_urls:
+  - "https://controlplane.tailscale.com/derpmap/default"
+headscale_derp_automatically_add_embedded_derp_region: true
+headscale_derp_auto_update_enabled: true
+headscale_derp_update_frequency: "24h"
+# Locally-rendered DERP map files (see README for the schema).
+headscale_derp_maps: []
+headscale_derp_paths_dir: "{{ headscale_admin_work_dir }}/derp.d"
+
+# Database (sqlite only; path under work_dir).
+headscale_db_debug: false
+
+# Logging (the supervised headscale's own log section).
+headscale_log_level: "info"
+headscale_log_format: "text"
+
+# Policy: "database" (edited live via the visual editor over gRPC) or "file".
+headscale_policy_mode: "database"
+headscale_policy_path: "{{ headscale_admin_work_dir }}/policy.hjson"
+
+# DNS / MagicDNS
+headscale_dns_magic_dns: true
+# Must differ from the server_url domain.
+headscale_dns_base_domain: "example.com"
+headscale_dns_override_local_dns: true
+headscale_dns_nameservers:
+  - "1.1.1.1"
+  - "1.0.0.1"
+headscale_dns_split: {}
+headscale_dns_search_domains: []
+headscale_dns_extra_records: []
+headscale_dns_extra_records_path: ""
+
+# headscale's OWN OIDC (so tailscale clients authenticate via your IdP). This
+# is independent from headscale-admin's OIDC above. Off by default.
+headscale_oidc_enabled: false
+headscale_oidc_only_start_if_available: true
+headscale_oidc_issuer: ""
+headscale_oidc_client_id: ""
+# When client_secret content is set AND client_secret_path is set, the role
+# writes the secret to that file (0600) and headscale.yaml references it via
+# client_secret_path (recommended - keeps the secret out of headscale.yaml).
+# Set client_secret_path to "" to inline the secret instead, or leave
+# client_secret empty and point client_secret_path at an externally-managed
+# file (e.g. a systemd LoadCredential path).
+headscale_oidc_client_secret: ""
+headscale_oidc_client_secret_path: "{{ headscale_admin_work_dir }}/oidc_client_secret"
+headscale_oidc_use_expiry_from_token: false
+headscale_oidc_scope: ["openid", "profile", "email"]
+headscale_oidc_extra_params: {}
+headscale_oidc_allowed_domains: []
+headscale_oidc_allowed_users: []
+headscale_oidc_allowed_groups: []
+headscale_oidc_pkce_enabled: false
+headscale_oidc_pkce_method: "S256"

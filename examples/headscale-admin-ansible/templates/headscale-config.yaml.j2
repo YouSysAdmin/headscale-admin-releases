@@ -1,0 +1,129 @@
+{{ ansible_managed | comment }}
+# Managed headscale config, pre-seeded by Ansible. headscale-admin downloads and
+# supervises the headscale binary; it reads listen_addr / grpc_listen_addr /
+# unix_socket from this file. headscale-admin is the public edge and terminates
+# TLS, so headscale stays on loopback with NO TLS of its own - do not add a
+# tls_* / acme section here.
+---
+# Client-facing control URL. headscale-admin terminates TLS and proxies to the
+# loopback listener below.
+server_url: {{ (headscale_admin_public_url if headscale_admin_public_url | length > 0 else 'http://127.0.0.1:8080') | to_json }}
+
+# headscale binds these on localhost only; headscale-admin is the public edge.
+listen_addr: {{ headscale_listen_addr | to_json }}
+metrics_listen_addr: {{ headscale_metrics_listen_addr | to_json }}
+grpc_listen_addr: {{ headscale_grpc_listen_addr | to_json }}
+
+# gRPC stays loopback-only without its own TLS; headscale-admin proxies remote
+# CLI/tool gRPC to it only when headscale.expose_grpc is enabled.
+grpc_allow_insecure: true
+
+# Honor proxy headers from the local headscale-admin front only.
+trusted_proxies:
+  - 127.0.0.1/32
+  - ::1/128
+
+noise:
+  private_key_path: {{ headscale_noise_private_key_path | to_json }}
+
+prefixes:
+  v4: {{ headscale_prefix_v4 | to_json }}
+  v6: {{ headscale_prefix_v6 | to_json }}
+  allocation: {{ headscale_prefix_allocation | to_json }}
+
+derp:
+  server:
+    enabled: {{ headscale_derp_enabled | bool | to_json }}
+{% if headscale_derp_enabled | bool %}
+    region_id: {{ headscale_derp_region_id }}
+    region_code: {{ headscale_derp_region_code | to_json }}
+    region_name: {{ headscale_derp_region_name | to_json }}
+    verify_clients: {{ headscale_derp_verify_clients | bool | to_json }}
+    stun_listen_addr: {{ headscale_derp_stun_listen_addr | to_json }}
+    private_key_path: {{ headscale_derp_private_key_path | to_json }}
+    automatically_add_embedded_derp_region: {{ headscale_derp_automatically_add_embedded_derp_region | bool | to_json }}
+{% if headscale_derp_ipv4 | length > 0 %}
+    ipv4: {{ headscale_derp_ipv4 | to_json }}
+{% endif %}
+{% if headscale_derp_ipv6 | length > 0 %}
+    ipv6: {{ headscale_derp_ipv6 | to_json }}
+{% endif %}
+{% endif %}
+  urls: {{ headscale_derp_urls | to_json }}
+  paths: {{ headscale_derp_local_paths | default([]) | to_json }}
+  auto_update_enabled: {{ headscale_derp_auto_update_enabled | bool | to_json }}
+  update_frequency: {{ headscale_derp_update_frequency | to_json }}
+
+# headscale-admin pins the headscale version, so disable the self-update check.
+disable_check_updates: {{ headscale_disable_check_updates | bool | to_json }}
+
+node:
+  # Default node expiry. Replaced the old `oidc.expiry` in headscale 0.29 and
+  # now applies to all nodes, not just OIDC-authenticated ones. A duration like
+  # "180d", or 0 for no default expiry.
+  expiry: {{ headscale_node_expiry | to_json }}
+  ephemeral:
+    inactivity_timeout: {{ headscale_ephemeral_node_inactivity_timeout | to_json }}
+
+database:
+  type: sqlite
+  debug: {{ headscale_db_debug | bool | to_json }}
+  sqlite:
+    path: {{ headscale_admin_work_dir }}/db.sqlite
+    write_ahead_log: true
+
+log:
+  level: {{ headscale_log_level | to_json }}
+  format: {{ headscale_log_format | to_json }}
+
+policy:
+  mode: {{ headscale_policy_mode | to_json }}
+{% if headscale_policy_mode == 'file' %}
+  path: {{ headscale_policy_path | to_json }}
+{% endif %}
+
+dns:
+  magic_dns: {{ headscale_dns_magic_dns | bool | to_json }}
+  # Must differ from the server_url domain.
+  base_domain: {{ headscale_dns_base_domain | to_json }}
+  override_local_dns: {{ headscale_dns_override_local_dns | bool | to_json }}
+  nameservers:
+    global: {{ headscale_dns_nameservers | default([]) | to_json }}
+    split: {{ headscale_dns_split | default({}) | to_json }}
+  search_domains: {{ headscale_dns_search_domains | default([]) | to_json }}
+  extra_records: {{ headscale_dns_extra_records | default([]) | to_json }}
+{% if headscale_dns_extra_records_path | length > 0 %}
+  extra_records_path: {{ headscale_dns_extra_records_path | to_json }}
+{% endif %}
+
+logtail:
+  enabled: {{ headscale_logtail_enabled | bool | to_json }}
+
+# CLI / headscale-admin talk to headscale over this unauthenticated socket.
+unix_socket: {{ headscale_admin_work_dir }}/headscale.sock
+unix_socket_permission: "0770"
+{% if headscale_oidc_enabled | bool %}
+
+# headscale's OWN OIDC (tailscale clients authenticate via your IdP). This is
+# independent from headscale-admin's login OIDC.
+oidc:
+  only_start_if_oidc_is_available: {{ headscale_oidc_only_start_if_available | bool | to_json }}
+  issuer: {{ headscale_oidc_issuer | to_json }}
+  client_id: {{ headscale_oidc_client_id | to_json }}
+  # client_secret and client_secret_path are mutually exclusive; prefer the
+  # file (the role writes the secret there when both content and path are set).
+{% if headscale_oidc_client_secret_path | length > 0 %}
+  client_secret_path: {{ headscale_oidc_client_secret_path | to_json }}
+{% elif headscale_oidc_client_secret | length > 0 %}
+  client_secret: {{ headscale_oidc_client_secret | to_json }}
+{% endif %}
+  use_expiry_from_token: {{ headscale_oidc_use_expiry_from_token | bool | to_json }}
+  scope: {{ headscale_oidc_scope | to_json }}
+  extra_params: {{ headscale_oidc_extra_params | default({}) | to_json }}
+  allowed_domains: {{ headscale_oidc_allowed_domains | default([]) | to_json }}
+  allowed_users: {{ headscale_oidc_allowed_users | default([]) | to_json }}
+  allowed_groups: {{ headscale_oidc_allowed_groups | default([]) | to_json }}
+  pkce:
+    enabled: {{ headscale_oidc_pkce_enabled | bool | to_json }}
+    method: {{ headscale_oidc_pkce_method | to_json }}
+{% endif %}

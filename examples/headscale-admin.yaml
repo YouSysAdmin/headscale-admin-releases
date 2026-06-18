@@ -1,0 +1,240 @@
+# Reference config for headscale-admin - every option, fully commented.
+#
+# headscale-admin auto-loads ./headscale-admin.yaml, or pass it explicitly:
+#   headscale-admin serve --config examples/headscale-admin.yaml
+#
+# As shipped this is a zero-setup local trial: auth is disabled, TLS is off and
+# it listens on :3000 (UI at http://localhost:3000/admin). For a real deploy,
+# enable auth + TLS and set headscale.public_url (see the docker-compose and
+# ansible examples alongside this file). For the project's own dev loop,
+# `make dev` uses dev/config.yaml instead.
+#
+# Env overrides: any setting can be set by an environment variable - prefix
+# HSA_, uppercase the dotted path, dots become underscores. So server.addr ->
+# HSA_SERVER_ADDR and auth.oidc.client_id -> HSA_AUTH_OIDC_CLIENT_ID. The env
+# name is noted next to each option below, and env wins over the file - the
+# tidy way to inject secrets (session_secret, OIDC client secret, pf token).
+
+server:
+  # The single public listener (the front): it terminates TLS and proxies
+  # /admin/* to the UI and everything else to the supervised headscale.
+  addr: :3000   # env: HSA_SERVER_ADDR
+
+  # headscale-admin's own state (the bbolt audit log etc.). Kept out of
+  # headscale.work_dir on purpose - that dir is headscale's data only. A
+  # relative path resolves against the working directory. Empty -> admin.db.
+  # db_path: /var/lib/headscale-admin/admin.db   # env: HSA_SERVER_DB_PATH
+
+  # Restrict access by client IP / CIDR. Empty or unset -> no restriction.
+  # ui_allow_ips gates the admin UI + API (/admin/*; /healthz stays open for
+  # monitoring); grpc_allow_ips gates the proxied headscale gRPC API (only
+  # meaningful with headscale.expose_grpc). headscale's control plane is
+  # never filtered. Loopback can show up as 127.0.0.1 or ::1 - list both.
+  # Behind an external proxy, set trusted_proxies so the real client IP is
+  # taken from X-Forwarded-For.
+  # ui_allow_ips: [192.168.1.0/24, 100.64.0.0/10]   # env: HSA_SERVER_UI_ALLOW_IPS
+  # grpc_allow_ips: [192.168.1.10]                   # env: HSA_SERVER_GRPC_ALLOW_IPS
+  # trusted_proxies: [127.0.0.1/32, ::1/128]         # env: HSA_SERVER_TRUSTED_PROXIES
+
+  # Keep the device-onboarding signup page (/admin/signup) public even when
+  # ui_allow_ips is set, so anyone can connect a device while the rest of the
+  # admin UI + API stays IP-restricted. Only the signup page and the static
+  # assets it needs are exempted; the data APIs stay gated. No effect without
+  # ui_allow_ips (everything is already public then).
+  # public_signup: true   # env: HSA_SERVER_PUBLIC_SIGNUP
+
+  # Set when an external proxy terminates TLS in front of this server (tls.mode
+  # below stays "none"). It makes session cookies Secure and emits HSTS even
+  # though this server's own hop is plain HTTP. Pair it with trusted_proxies
+  # listing that terminator. Leave false when this server terminates TLS itself.
+  # behind_tls_proxy: true   # env: HSA_SERVER_BEHIND_TLS_PROXY
+
+  # What the bare public root "/" serves. Unset -> redirect to the signup
+  # landing page (the default). Two modes:
+  #
+  #   mode: redirect   (default)
+  #     target: signup | signin | dashboard   # admin-UI page shorthands
+  #            | /some/path                    # absolute path on this host
+  #            | https://docs.corp.example/... # any external URL (e.g. wiki)
+  #     status: 302                            # 301/302/303/307/308 (default 302)
+  #
+  #   mode: page        # serve an inline response instead of redirecting
+  #     body: "Nothing to see here."           # any text; omit for an empty body
+  #     status: 404                            # any HTTP code (default 200)
+  #     content_type: text/plain; charset=utf-8  # default; use text/html for markup
+  #
+  # env: HSA_SERVER_ROOT_MODE, HSA_SERVER_ROOT_TARGET, HSA_SERVER_ROOT_STATUS,
+  #      HSA_SERVER_ROOT_BODY, HSA_SERVER_ROOT_CONTENT_TYPE
+  # root:
+  #   mode: redirect
+  #   target: signin
+
+  # TLS modes (see internal/core/tlsutils):
+  #   none    -- plain HTTP (default; what dev runs as)
+  #   manual  -- operator-supplied cert + key paths
+  #   self    -- self-signed cert generated at startup (handy for IP-only deploys)
+  #   acme    -- Let's Encrypt via autocert; needs hosts (and email)
+  tls:
+    mode: none   # env: HSA_SERVER_TLS_MODE
+    # mode: self
+    # fqdn: localhost   # env: HSA_SERVER_TLS_FQDN
+    # alg: rsa          # rsa | ed25519   (env: HSA_SERVER_TLS_ALG)
+    #
+    # mode: manual
+    # cert: /etc/headscale-admin/server.crt   # env: HSA_SERVER_TLS_CERT
+    # key:  /etc/headscale-admin/server.key   # env: HSA_SERVER_TLS_KEY
+    #
+    # mode: acme
+    # acme:
+    #   email: ops@example.com                     # env: HSA_SERVER_TLS_ACME_EMAIL
+    #   cache_dir: /var/lib/headscale-admin/certs  # env: HSA_SERVER_TLS_ACME_CACHE_DIR
+    #   http_addr: :80                             # env: HSA_SERVER_TLS_ACME_HTTP_ADDR
+    #   hosts: [ui.example.com]                    # env: HSA_SERVER_TLS_ACME_HOSTS
+
+auth:
+  # Set true to bypass OIDC entirely (everyone is "admin"). Local dev only.
+  disabled: true   # env: HSA_AUTH_DISABLED
+
+  # HMAC secret signing the session cookie. Generate with
+  # `openssl rand -hex 32`. Must be >= 32 chars when auth is enabled.
+  session_secret: headscale-admin-dev-only-session-secret-replace-me   # env: HSA_AUTH_SESSION_SECRET
+
+  # Cookie lifetime. Empty -> 12h.
+  session_ttl: 12h   # env: HSA_AUTH_SESSION_TTL
+
+  # Login is per-user: email+password when OIDC is off, OIDC otherwise. The admin
+  # surface needs at least one admin; seed the first one either way:
+  #
+  #   1. From the environment on startup (recommended for containers - seeded
+  #      in-process, so no database-lock contention). serve creates a pinned
+  #      super-admin if no account with this email exists yet; idempotent, it
+  #      never overwrites an existing account:
+  # bootstrap_admin:
+  #   email: you@example.com    # env: HSA_AUTH_BOOTSTRAP_ADMIN_EMAIL
+  #   password: change-me       # env: HSA_AUTH_BOOTSTRAP_ADMIN_PASSWORD (8-72 chars; omit when OIDC is on)
+  #
+  #   2. Out-of-band CLI - run while the server is STOPPED (it opens the same DB
+  #      that serve holds locked):
+  #        headscale-admin admin create --config /etc/headscale-admin/config.yaml
+  #      Prompts for email+password (email-only when OIDC is on; the matching
+  #      same-email OIDC account then signs in as admin).
+
+  oidc:
+    enabled: false   # env: HSA_AUTH_OIDC_ENABLED
+    # Name shown on the login button ("Sign in with <label>") and the settings
+    # page. Empty -> the issuer host (e.g. accounts.example.com) is used.
+    # label: JumpCloud                            # env: HSA_AUTH_OIDC_LABEL
+    # issuer: https://accounts.example.com        # env: HSA_AUTH_OIDC_ISSUER
+    # client_id: headscale-admin                  # env: HSA_AUTH_OIDC_CLIENT_ID
+    # client_secret: ""                           # env: HSA_AUTH_OIDC_CLIENT_SECRET (prefer the env var)
+    # The UI is served under /admin, so the callback path is /admin/api/...
+    # redirect_url: http://localhost:8080/admin/api/auth/oidc/callback   # env: HSA_AUTH_OIDC_REDIRECT_URL
+    # scopes: [openid, email, profile]            # env: HSA_AUTH_OIDC_SCOPES
+    # require_email_verified: true                # env: HSA_AUTH_OIDC_REQUIRE_EMAIL_VERIFIED
+    # allowed_domains: []                         # env: HSA_AUTH_OIDC_ALLOWED_DOMAINS
+    # allowed_emails: []                          # env: HSA_AUTH_OIDC_ALLOWED_EMAILS
+    # groups_claim: groups                        # env: HSA_AUTH_OIDC_GROUPS_CLAIM
+    #
+    # RBAC role mapping. admin = full access; operator = tailnet / network-access
+    # config only (no audit log, backups, config, or version updates). The
+    # matched role is re-applied on every login (IdP groups are the source of
+    # truth). Precedence: admin_emails -> admin_groups -> operator_groups ->
+    # default_role; highest privilege wins (a user in both an admin and operator
+    # group is admin). admin_emails also PIN those users to admin (exempt from
+    # group-based downgrade), so they're the bootstrap admins when OIDC is on.
+    #
+    # These also drive admission - there is no separate allowed_groups. A user
+    # may sign in if they match allowed_emails, admin_emails, allowed_domains, OR
+    # any admin_groups/operator_groups entry (their union is the group allowlist).
+    # admin_emails: []        # always admin (and pinned)        (env: HSA_AUTH_OIDC_ADMIN_EMAILS)
+    # admin_groups: []        # -> admin    (requires groups_claim)   (env: HSA_AUTH_OIDC_ADMIN_GROUPS)
+    # operator_groups: []     # -> operator (requires groups_claim)   (env: HSA_AUTH_OIDC_OPERATOR_GROUPS)
+    # default_role: none      # fallback when no rule matched: "none" (default)
+    #                         # denies; "operator"/"admin" grants. (env: HSA_AUTH_OIDC_DEFAULT_ROLE)
+
+logging:
+  level: info     # env: HSA_LOGGING_LEVEL
+  format: text    # env: HSA_LOGGING_FORMAT
+  color: true     # env: HSA_LOGGING_COLOR
+  output: stdout  # env: HSA_LOGGING_OUTPUT
+
+
+# headscale-admin always runs headscale itself (managed mode): it downloads the
+# pinned binary (verified against the release checksums), generates and owns
+# headscale.yaml + the sqlite DB / keys under work_dir, and dials the unix
+# socket it creates. The single-port front serves the UI under /admin and
+# proxies everything else to headscale - there is no remote/external option.
+headscale:
+  # Where the supervised headscale's config, sqlite DB, keys and socket live.
+  work_dir: ./headscale-data   # env: HSA_HEADSCALE_WORK_DIR
+
+  # Where downloaded release binaries (headscale, headscale-pf) are cached.
+  # Empty -> "<work_dir>/bin"; set it to keep binaries out of the data dir.
+  # bin_dir: /opt/headscale-admin/bin   # env: HSA_HEADSCALE_BIN_DIR
+
+  # Client-facing control-server URL: becomes headscale's server_url and the
+  # UI connect command. Clients reach headscale through this same address
+  # (the front proxies the control endpoints to it).
+  public_url: http://127.0.0.1:3000   # env: HSA_HEADSCALE_PUBLIC_URL
+
+  # headscale release to run. Defaults to the version headscale-admin is built
+  # against; changing it risks gRPC proto skew.
+  # version: v0.29.1   # env: HSA_HEADSCALE_VERSION
+
+  # Run a specific headscale binary instead of downloading one (air-gapped).
+  # binary: /usr/local/bin/headscale   # env: HSA_HEADSCALE_BINARY
+
+  # Proxy headscale's gRPC management API (remote `headscale` CLI / tools,
+  # authenticated by headscale API keys) through the public front. Off by
+  # default: the admin UI talks to headscale over the local socket and does
+  # not need it.
+  # expose_grpc: false   # env: HSA_HEADSCALE_EXPOSE_GRPC
+
+  # Per-request gRPC deadline. Empty -> 10s.
+  request_timeout: 10s   # env: HSA_HEADSCALE_REQUEST_TIMEOUT
+
+
+# External-user sync (optional) - the "User sync" page under SYSTEM. When
+# enabled, headscale-admin downloads the pinned headscale-pf release
+# (https://github.com/YouSysAdmin/headscale-pf, verified against its
+# checksums.sha256), runs it against the current ACL policy as a template to
+# fill each "group:" from an external identity source, then applies the result
+# over the local gRPC socket after you review the diff.
+#
+# Secrets (the source token / LDAP bind password) come only from this config -
+# inline or from a file via the matching *_file key - and are passed to
+# headscale-pf via PF_* env vars; they are never exposed to the browser.
+headscale_pf:
+  enabled: false   # env: HSA_HEADSCALE_PF_ENABLED
+
+  # headscale-pf release to run. Empty -> the pinned default (v3.0.1). It has no
+  # gRPC proto coupling, so pin or update it freely (also from the UI).
+  # version: v3.0.1   # env: HSA_HEADSCALE_PF_VERSION
+
+  # Run a specific headscale-pf binary instead of downloading one (air-gapped).
+  # Disables UI version updates.
+  # binary: /usr/local/bin/headscale-pf   # env: HSA_HEADSCALE_PF_BINARY
+
+  # Identity source: jc|jumpcloud, ak|authentik, ldap|ldaps, kk|keycloak.
+  # source: jc                                # env: HSA_HEADSCALE_PF_SOURCE
+  # endpoint: https://console.jumpcloud.com   # env: HSA_HEADSCALE_PF_ENDPOINT
+
+  # Source API token (Jumpcloud / Authentik / Keycloak). Inline or token_file
+  # (mutually exclusive). Prefer token_file or the env var.
+  # token: ""                                       # env: HSA_HEADSCALE_PF_TOKEN
+  # token_file: /run/secrets/headscale-pf-token     # env: HSA_HEADSCALE_PF_TOKEN_FILE
+
+  # Skip TLS verification for HTTPS / LDAPS / StartTLS sources.
+  # insecure_skip_tls_verify: false   # env: HSA_HEADSCALE_PF_INSECURE_SKIP_TLS_VERIFY
+
+  # LDAP-only settings.
+  # ldap:
+  #   base_dn: dc=example,dc=com             # env: HSA_HEADSCALE_PF_LDAP_BASE_DN
+  #   bind_dn: cn=readonly,dc=example,dc=com  # env: HSA_HEADSCALE_PF_LDAP_BIND_DN
+  #   bind_password: ""                       # env: HSA_HEADSCALE_PF_LDAP_BIND_PASSWORD (or bind_password_file)
+  #   bind_password_file: /run/secrets/ldap-bind-password   # env: HSA_HEADSCALE_PF_LDAP_BIND_PASSWORD_FILE
+  #   default_email_domain: example.com       # env: HSA_HEADSCALE_PF_LDAP_DEFAULT_EMAIL_DOMAIN
+
+  # Keycloak-only settings.
+  # keycloak:
+  #   realm: my-realm   # env: HSA_HEADSCALE_PF_KEYCLOAK_REALM

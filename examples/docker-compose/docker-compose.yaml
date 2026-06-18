@@ -1,0 +1,84 @@
+# headscale-admin - docker compose example.
+#
+# Single self-contained service: it supervises headscale as a child process and
+# is the only public listener. All persistent state (sqlite DB, generated
+# headscale.yaml, noise/DERP keys, unix socket, and the downloaded headscale
+# binary) lives under /data, backed by the named `headscale-data` volume - so
+# recreating the container keeps your network, nodes and keys intact.
+#
+# Quick start (pull the published image - no build step needed):
+#   1. cd examples/docker-compose && cp .env.example .env && edit .env   # secrets
+#   2. edit config.docker.yaml           # set your public_url / TLS mode
+#   3. docker compose up -d              # pulls ghcr.io/yousysadmin/headscale-admin
+#   4. open https://<your-host>/admin
+#
+# Build from source instead? Comment out `image:` below and uncomment the
+# `build:` block; then `docker compose up -d --build` builds the frontend +
+# binary end to end (context is the repo root, Dockerfile lives here).
+#
+# Notes:
+#   - The container needs OUTBOUND internet on first start to download the
+#     pinned, checksum-verified headscale binary (cached on the volume after).
+#   - A named volume (not a host bind mount) is used on purpose: the image runs
+#     as nonroot (uid 65532) and seeds /data with the right ownership, so the
+#     volume is writable out of the box. A host bind mount would need a manual
+#     chown to 65532.
+
+name: headscale-admin
+
+services:
+  headscale-admin:
+    # Default: pull the published multi-arch image (linux/amd64 + arm64).
+    # Pin a release tag (e.g. :v0.29.1) instead of :latest for reproducible deploys.
+    image: ghcr.io/yousysadmin/headscale-admin:latest
+
+    # Build from source instead of pulling. Comment out `image:` above, uncomment
+    # this, then `docker compose up -d --build`. Context is the repo root so the
+    # build can reach the Go/Svelte sources; the Dockerfile lives here.
+    # build:
+    #   context: ../..
+    #   dockerfile: examples/docker-compose/Dockerfile
+
+    restart: unless-stopped
+
+    ports:
+      # UI + control plane. With tls.mode: none this is plain HTTP on 3000;
+      # front it with your own TLS proxy, or switch to built-in TLS below.
+      - "3000:3000"
+      #
+      # Built-in ACME TLS (config.docker.yaml -> tls.mode: acme): the front
+      # serves HTTPS on :3000 and answers the ACME HTTP-01 challenge on :80.
+      # Publish both, on the standard public ports:
+      # - "443:3000"
+      # - "80:80"
+
+    environment:
+      # Required secret (auth is enabled in config.docker.yaml): the session
+      # cookie HMAC key. Defined in .env; compose fails fast if unset. Generate
+      # with `openssl rand -hex 32`.
+      HSA_AUTH_SESSION_SECRET: ${HSA_AUTH_SESSION_SECRET:?set in .env}
+      # First-admin bootstrap (login is per-user; there is no shared token). On
+      # first start, serve seeds a pinned super-admin with these credentials when
+      # no account with this email exists yet. Idempotent: leave them set, or
+      # remove after the first boot. Set both in .env; omit the password when OIDC
+      # is enabled (identity comes from the IdP).
+      HSA_AUTH_BOOTSTRAP_ADMIN_EMAIL: ${HSA_AUTH_BOOTSTRAP_ADMIN_EMAIL:-}
+      HSA_AUTH_BOOTSTRAP_ADMIN_PASSWORD: ${HSA_AUTH_BOOTSTRAP_ADMIN_PASSWORD:-}
+      # OIDC client secret (only if you enable oidc in config.docker.yaml):
+      # HSA_AUTH_OIDC_CLIENT_SECRET: ${HSA_AUTH_OIDC_CLIENT_SECRET:-}
+      TZ: UTC
+
+    volumes:
+      # headscale-admin's own config (read-only), at the image's default
+      # --config path. To keep config on the volume instead, mount it at
+      # /data/config.yaml and override `command: [serve, --config, /data/config.yaml]`.
+      - ./config.docker.yaml:/config.yaml:ro
+      # Everything persistent: DB + headscale.yaml + keys + socket + binary.
+      - headscale-data:/data
+
+    # The control plane uses HTTP long-poll/upgrade streams; give it time to
+    # drain on stop so peers reconnect cleanly rather than getting cut.
+    stop_grace_period: 30s
+
+volumes:
+  headscale-data:

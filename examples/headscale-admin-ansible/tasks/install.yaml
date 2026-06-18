@@ -1,0 +1,309 @@
+---
+- name: Validate install source
+  ansible.builtin.assert:
+    that:
+      - headscale_admin_install_source in ['github', 'url', 's3']
+    fail_msg: >-
+      headscale_admin_install_source must be one of github|url|s3
+      (got "{{ headscale_admin_install_source }}").
+
+- name: Set artifact base name
+  ansible.builtin.set_fact:
+    # Legacy raw-binary name (custom releases, or the url/s3 sources).
+    _artifact_basename: "{{ headscale_admin_binary_name }}-{{ headscale_admin_os }}-{{ headscale_admin_arch }}"
+    # GitHub releases are built by GoReleaser, which names per-os/arch archives
+    #   <name>_v<version>_<os>_<arch>.tar.gz
+    # Match that for this host's os/arch, version-agnostic (so it works with
+    # headscale_admin_version: latest), and still accept a legacy raw binary
+    #   <name>-<os>-<arch>[.tar.gz|.tgz|.zip].
+    _asset_regex: >-
+      ^{{ headscale_admin_binary_name | regex_escape }}([_-].+)?[_-]{{ headscale_admin_os }}[_-]{{ headscale_admin_arch }}(\.(tar\.gz|tgz|zip))?$
+    _expected_sha256: "{{ headscale_admin_sha256 | default('') | lower }}"
+
+# ---------------------------------------------------------------------------
+# Source: github (resolve release -> asset URL [+ checksum])
+# ---------------------------------------------------------------------------
+- name: Resolve via GitHub release
+  when: headscale_admin_install_source == 'github'
+  block:
+    - name: Build GitHub release API URL
+      ansible.builtin.set_fact:
+        _release_api_url: >-
+          https://api.github.com/repos/{{ headscale_admin_repo }}/releases/{{
+            'latest' if headscale_admin_version == 'latest'
+            else 'tags/' + headscale_admin_version
+          }}
+
+    - name: Prepare GitHub headers
+      ansible.builtin.set_fact:
+        _github_headers: >-
+          {{
+            {'Accept': 'application/vnd.github+json', 'User-Agent': 'ansible-headscale-admin-role'}
+            | combine(
+                {'Authorization': 'Bearer ' ~ headscale_admin_github_token}
+                if (headscale_admin_github_token | default('')) | length > 0 else {}
+              )
+          }}
+
+    - name: Query GitHub release metadata
+      ansible.builtin.uri:
+        url: "{{ _release_api_url }}"
+        headers: "{{ _github_headers }}"
+        return_content: true
+        follow_redirects: all
+        status_code: 200
+      register: _gh
+      check_mode: false
+      changed_when: false
+
+    - name: Decode GitHub release JSON
+      ansible.builtin.set_fact:
+        _gh_json: "{{ _gh.json | default(_gh.content | from_json) }}"
+
+    - name: Validate GitHub response shape
+      ansible.builtin.assert:
+        that:
+          - _gh_json.tag_name is defined
+          - _gh_json.assets is defined
+        fail_msg: >-
+          Unexpected GitHub API response: {{ _gh_json.message | default('no tag_name/assets') }}
+
+    - name: Select the binary asset
+      ansible.builtin.set_fact:
+        _asset_obj: >-
+          {{
+            (_gh_json.assets | selectattr('name', 'equalto', _artifact_basename) | list | first)
+            | default(
+                _gh_json.assets
+                | rejectattr('name', 'equalto', headscale_admin_checksums_asset)
+                | selectattr('name', 'search', _asset_regex)
+                | list | first | default({})
+              )
+          }}
+
+    - name: Fail when no matching asset was found
+      ansible.builtin.fail:
+        msg: >-
+          No asset matching /{{ _asset_regex }}/ (or "{{ _artifact_basename }}")
+          in release {{ _gh_json.tag_name }}.
+          Available: {{ _gh_json.assets | map(attribute='name') | list }}
+      when: _asset_obj | length == 0
+
+    - name: Set download facts from asset
+      ansible.builtin.set_fact:
+        _artifact_name: "{{ _asset_obj.name }}"
+        _download_url: "{{ _asset_obj.browser_download_url }}"
+
+    - name: Locate checksums asset
+      ansible.builtin.set_fact:
+        _checksums_url: >-
+          {{
+            (_gh_json.assets | selectattr('name', 'equalto', headscale_admin_checksums_asset)
+             | map(attribute='browser_download_url') | list | first) | default('')
+          }}
+      when: _expected_sha256 | length == 0
+
+    - name: Download and parse checksums
+      when:
+        - _expected_sha256 | length == 0
+        - _checksums_url | length > 0
+      block:
+        - name: Fetch checksums file
+          ansible.builtin.uri:
+            url: "{{ _checksums_url }}"
+            return_content: true
+          register: _checks
+          check_mode: false
+          changed_when: false
+
+        - name: Extract SHA-256 for the asset
+          ansible.builtin.set_fact:
+            _expected_sha256: >-
+              {{
+                (_checks.content.splitlines()
+                 | select('search', '\\s' ~ (_artifact_name | regex_escape) ~ '$')
+                 | map('regex_replace', '^([0-9a-fA-F]{64}).*$', '\\1')
+                 | list | first | default('')) | lower
+              }}
+
+# ---------------------------------------------------------------------------
+# Source: url
+# ---------------------------------------------------------------------------
+- name: Resolve via direct URL
+  when: headscale_admin_install_source == 'url'
+  block:
+    - name: Require a download URL
+      ansible.builtin.assert:
+        that: [headscale_admin_download_url | length > 0]
+        fail_msg: "headscale_admin_download_url is required when install source is 'url'."
+
+    - name: Set download facts from URL
+      ansible.builtin.set_fact:
+        _download_url: "{{ headscale_admin_download_url }}"
+        _artifact_name: "{{ headscale_admin_download_url | urlsplit('path') | basename }}"
+
+# ---------------------------------------------------------------------------
+# Source: s3
+# ---------------------------------------------------------------------------
+- name: Resolve via S3
+  when: headscale_admin_install_source == 's3'
+  block:
+    - name: Require S3 bucket and object
+      ansible.builtin.assert:
+        that:
+          - headscale_admin_s3_bucket | length > 0
+          - headscale_admin_s3_object | length > 0
+        fail_msg: "headscale_admin_s3_bucket and headscale_admin_s3_object are required for the 's3' source."
+
+    - name: Set artifact name from S3 object
+      ansible.builtin.set_fact:
+        _artifact_name: "{{ headscale_admin_s3_object | basename }}"
+
+# ---------------------------------------------------------------------------
+# Common: checksum gate, download, verify, install
+# ---------------------------------------------------------------------------
+- name: Require a checksum when configured
+  ansible.builtin.fail:
+    msg: >-
+      No SHA-256 could be determined for {{ _artifact_name }} and
+      headscale_admin_checksum_required is true. Set headscale_admin_sha256.
+  when:
+    - headscale_admin_checksum_required | bool
+    - _expected_sha256 | length == 0
+
+- name: Determine if the artifact is an archive
+  ansible.builtin.set_fact:
+    _is_archive: "{{ _artifact_name is match('.*\\.(tar\\.gz|tgz|zip)$') }}"
+    _download_path: "/tmp/{{ _artifact_name }}"
+
+- name: Download headscale-admin (github / url)
+  ansible.builtin.get_url:
+    url: "{{ _download_url }}"
+    dest: "{{ _download_path }}"
+    mode: "0644"
+    checksum: "{{ ('sha256:' ~ _expected_sha256) if _expected_sha256 | length > 0 else omit }}"
+  when:
+    - headscale_admin_install_source in ['github', 'url']
+    - not ansible_check_mode
+
+- name: Download headscale-admin (s3)
+  amazon.aws.s3_object:
+    bucket: "{{ headscale_admin_s3_bucket }}"
+    object: "{{ headscale_admin_s3_object }}"
+    dest: "{{ _download_path }}"
+    mode: get
+    # Skip the HeadBucket pre-flight (bucket_check), which needs s3:ListBucket.
+    # With it on, a least-privilege role that only has s3:GetObject on the
+    # object (enough for `aws s3 cp`) fails with "Permission denied accessing
+    # bucket ... (during bucket_check)". The get itself only needs GetObject.
+    ignore_nonexistent_bucket: true
+    region: "{{ headscale_admin_s3_region | default(omit, true) }}"
+    endpoint_url: "{{ headscale_admin_s3_endpoint_url | default(omit, true) }}"
+  when:
+    - headscale_admin_install_source == 's3'
+    - not ansible_check_mode
+
+- name: Verify S3 artifact checksum
+  when:
+    - headscale_admin_install_source == 's3'
+    - _expected_sha256 | length > 0
+    - not ansible_check_mode
+  block:
+    - name: Stat downloaded artifact
+      ansible.builtin.stat:
+        path: "{{ _download_path }}"
+        checksum_algorithm: sha256
+      register: _dl_stat
+
+    - name: Assert checksum matches
+      ansible.builtin.assert:
+        that: [_dl_stat.stat.checksum | lower == _expected_sha256]
+        fail_msg: >-
+          SHA-256 mismatch for {{ _artifact_name }}:
+          got {{ _dl_stat.stat.checksum }}, expected {{ _expected_sha256 }}.
+
+- name: Install headscale-admin
+  block:
+    - name: Install raw binary
+      ansible.builtin.copy:
+        src: "{{ _download_path }}"
+        dest: "{{ headscale_admin_binary_path }}"
+        owner: root
+        group: root
+        mode: "0755"
+        remote_src: true
+      when:
+        - not (_is_archive | bool)
+        - not ansible_check_mode
+      register: _bin_installed
+      notify: Restart headscale-admin
+
+    - name: Install from archive
+      when:
+        - _is_archive | bool
+        - not ansible_check_mode
+      block:
+        - name: Create temp extraction dir
+          ansible.builtin.tempfile:
+            state: directory
+            suffix: headscale-admin
+          register: _hsa_tmp
+
+        - name: Unarchive artifact
+          ansible.builtin.unarchive:
+            src: "{{ _download_path }}"
+            dest: "{{ _hsa_tmp.path }}"
+            remote_src: true
+
+        - name: Find extracted headscale-admin binary
+          ansible.builtin.find:
+            paths: "{{ _hsa_tmp.path }}"
+            patterns: "{{ headscale_admin_binary_name }}"
+            recurse: true
+            file_type: file
+          register: _hsa_found
+
+        - name: Fail if binary not found in archive
+          ansible.builtin.fail:
+            msg: "Archive {{ _artifact_name }} did not contain a '{{ headscale_admin_binary_name }}' binary."
+          when: (_hsa_found.matched | default(0)) | int == 0
+
+        - name: Install binary from archive
+          ansible.builtin.copy:
+            src: "{{ (_hsa_found.files | map(attribute='path') | list)[0] }}"
+            dest: "{{ headscale_admin_binary_path }}"
+            owner: root
+            group: root
+            mode: "0755"
+            remote_src: true
+          register: _bin_installed
+          notify: Restart headscale-admin
+
+  always:
+    - name: Remove downloaded artifact
+      ansible.builtin.file:
+        path: "{{ _download_path }}"
+        state: absent
+      when: not ansible_check_mode
+
+    - name: Remove temp extraction dir
+      ansible.builtin.file:
+        path: "{{ _hsa_tmp.path }}"
+        state: absent
+      when:
+        - _hsa_tmp is defined
+        - _hsa_tmp.path is defined
+        - not ansible_check_mode
+
+- name: Get installed headscale-admin version
+  ansible.builtin.command: "{{ headscale_admin_binary_path }} version"
+  register: _hsa_version
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  when: not ansible_check_mode
+
+- name: Show installed version
+  ansible.builtin.debug:
+    msg: "headscale-admin: {{ _hsa_version.stdout | default('n/a') | trim }}"
+  when: not ansible_check_mode

@@ -1,0 +1,15 @@
+---
+_os_map:
+  Linux: linux
+  Darwin: darwin
+
+# headscale-admin publishes only amd64 / arm64 binaries (see the project
+# Makefile RELEASE_TARGETS). Map the host arch onto those.
+_arch_map:
+  x86_64: amd64
+  amd64: amd64
+  aarch64: arm64
+  arm64: arm64
+
+headscale_admin_arch: "{{ _arch_map.get(ansible_architecture, ansible_architecture) }}"
+headscale_admin_os: "{{ _os_map.get(ansible_system, (ansible_system | default('Linux')) | lower) }}"

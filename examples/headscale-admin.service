@@ -1,0 +1,67 @@
+# Example systemd unit for headscale-admin.
+#
+# Assumes a manual install with this layout (the headscale-admin-ansible role
+# alongside this file automates an equivalent setup):
+#   adduser --system hsa --home /opt/hsa
+#   binary  -> /opt/hsa/headscale-admin
+#   config  -> /opt/hsa/config.yaml   (headscale.work_dir: /opt/hsa/headscale-data)
+#   secrets -> /etc/headscale-admin/env  (HSA_* vars, root:hsa 0640)
+#
+# Install with:
+#   cp examples/headscale-admin.service /etc/systemd/system/
+#   systemctl daemon-reload
+#   systemctl enable --now headscale-admin
+
+[Unit]
+Description=headscale-admin (admin UI + managed headscale)
+# First start downloads the pinned headscale release, so wait for real
+# network, not just the stack coming up.
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=hsa
+Group=hsa
+ExecStart=/opt/hsa/headscale-admin serve --config /opt/hsa/config.yaml
+WorkingDirectory=/opt/hsa
+
+# Secrets via HSA_* env vars (e.g. HSA_AUTH_SESSION_SECRET,
+# HSA_AUTH_OIDC_CLIENT_SECRET). Login is per-user: bootstrap the first admin
+# with `headscale-admin admin create` (or set auth.oidc.admin_emails).
+EnvironmentFile=-/etc/headscale-admin/env
+
+Restart=on-failure
+RestartSec=5s
+
+# headscale runs as a child process; the default control-group kill mode
+# stops it together with the supervisor.
+KillMode=control-group
+TimeoutStopSec=30s
+
+# Allow binding :443/:80 (tls.mode acme or any port < 1024) without root.
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+
+# Hardening. The filesystem is read-only except work_dir, where the
+# supervised headscale keeps its config, sqlite DB, keys and socket.
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/opt/hsa
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+RestrictRealtime=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+
+[Install]
+WantedBy=multi-user.target

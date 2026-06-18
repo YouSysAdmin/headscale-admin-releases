@@ -1,0 +1,118 @@
+# headscale-admin - container config.
+#
+# Mounted read-only at /config.yaml (the image's default --config path; you
+# could instead place it at /data/config.yaml on the volume by overriding the
+# container command). See examples/headscale-admin.yaml for the fully-commented
+# reference.
+#
+# >>> ALL persistent state lives under headscale.work_dir, which points at the
+#     /data volume: the sqlite DB, the generated headscale.yaml, the noise/DERP
+#     keys, the unix socket, and the downloaded+verified headscale binary
+#     (under /data/bin). Persist /data and you persist everything. <<<
+
+server:
+  # The single public listener (the "front"): it terminates TLS and proxies
+  # /admin/* to the UI and every other path to the supervised headscale control
+  # server. Matches the image's EXPOSE 3000.
+  addr: :3000
+
+  # Database path
+  db_path: /data/admin.db
+
+  # Restrict access by client IP / CIDR. Empty or unset -> no restriction.
+  # ui_allow_ips gates the admin UI + API (/admin/*; /healthz stays open for
+  # monitoring); grpc_allow_ips gates the proxied headscale gRPC API (only
+  # meaningful with headscale.expose_grpc). headscale's control plane is
+  # never filtered - tailscale clients connect from anywhere. Behind an
+  # external proxy, set trusted_proxies so the real client IP is taken from
+  # X-Forwarded-For. Loopback can show up as 127.0.0.1 or ::1 - list both.
+  # ui_allow_ips: [192.168.1.0/24, 100.64.0.0/10]
+  # grpc_allow_ips: [192.168.1.10]
+  # trusted_proxies: [127.0.0.1/32, ::1/128]
+
+  # TLS - headscale-admin terminates TLS itself. Pick one.
+  tls:
+    # none: plain HTTP. Use only behind your own TLS-terminating proxy, or for
+    # a quick local test. Real Tailscale clients need HTTPS - use self/acme.
+    mode: none
+
+    # self: self-signed cert generated at startup (handy for IP-only/internal).
+    # mode: self
+    # fqdn: hs.example.com
+
+    # acme: Let's Encrypt via autocert. Needs ports 80 (HTTP-01) and 443 to be
+    # publicly reachable (see the compose port mapping). cache_dir lives on the
+    # volume so issued certs survive a container recreate.
+    # mode: acme
+    # acme:
+    #   email: ops@example.com
+    #   hosts: [hs.example.com]
+    #   http_addr: :80
+    #   cache_dir: /data/certs
+
+auth:
+  # Real deployment: keep auth on. Secrets are supplied via the environment
+  # (see .env) rather than baked into this file:
+  #   session_secret -> HSA_AUTH_SESSION_SECRET  (cookie HMAC, >= 32 chars)
+  #
+  # Login is per-user: email+password when OIDC is off, OIDC otherwise. With auth
+  # on, the admin surface needs at least one admin - seed the first one on first
+  # start via the environment (see .env / compose):
+  #   HSA_AUTH_BOOTSTRAP_ADMIN_EMAIL     (required)
+  #   HSA_AUTH_BOOTSTRAP_ADMIN_PASSWORD  (8-72 chars; omit when OIDC is on)
+  # Seeding is idempotent: it creates the admin only if that email doesn't exist
+  # yet and never overwrites an existing account.
+  disabled: false
+  session_ttl: 12h
+
+  oidc:
+    enabled: false
+    # issuer: https://accounts.example.com
+    # client_id: headscale-admin
+    # client_secret via HSA_AUTH_OIDC_CLIENT_SECRET
+    # The UI is served under /admin, so the callback path is /admin/api/...
+    # redirect_url: https://hs.example.com/admin/api/auth/oidc/callback
+    # scopes: [openid, email, profile]
+    # allowed_domains: []
+    # allowed_emails: []
+    # groups_claim: groups
+    #
+    # RBAC role mapping (admin = full; operator = tailnet/network config only).
+    # Maps a user to a ROLE, re-applied every login; highest privilege wins.
+    # Precedence: admin_emails -> admin_groups -> operator_groups -> default_role.
+    # These ALSO drive admission (no separate allowed_groups): a user may sign in
+    # if they match allowed_emails, admin_emails, allowed_domains, or any
+    # admin_groups/operator_groups entry. admin_emails also pin to admin (bootstrap).
+    # admin_emails: []
+    # admin_groups: []        # requires groups_claim
+    # operator_groups: []     # requires groups_claim
+    # default_role: none      # fallback: "none" (default) denies if no rule matched; or "operator"/"admin"
+
+logging:
+  level: info
+  format: json
+  output: stdout
+
+headscale:
+  # Where the supervised headscale's config, sqlite DB, keys, socket and the
+  # downloaded binary live - this is the path backed by the /data volume.
+  work_dir: /data/headscale
+
+  # Client-facing control-server URL (becomes headscale's server_url). MUST
+  # match how clients actually connect to this service (scheme + host + any
+  # non-default port). Change the host.
+  public_url: https://hs.example.com
+
+  # Pin the headscale release. Defaults to the version headscale-admin is built
+  # against (v0.29.1); changing it risks gRPC proto skew. The binary is fetched
+  # from GitHub and checksum-verified once, then cached in /data/bin.
+  # version: v0.29.1
+
+  # Proxy headscale's gRPC management API (remote `headscale` CLI / tools,
+  # authenticated by headscale API keys) through the public front. Off by
+  # default: the admin UI talks to headscale over the local socket and does
+  # not need it.
+  # expose_grpc: false
+
+  # Per-request gRPC deadline. Empty -> 10s.
+  request_timeout: 10s

@@ -1,0 +1,34 @@
+---
+- name: Deploy systemd service unit
+  ansible.builtin.template:
+    src: headscale-admin.service.j2
+    dest: "/etc/systemd/system/{{ headscale_admin_service_name }}.service"
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart headscale-admin
+
+- name: Deploy logrotate config
+  ansible.builtin.template:
+    src: logrotate.j2
+    dest: "/etc/logrotate.d/{{ headscale_admin_service_name }}"
+    owner: root
+    group: root
+    mode: "0644"
+  when:
+    - headscale_admin_logrotate_enabled | bool
+    - headscale_admin_log_output != "stdout"
+
+- name: Remove logrotate config when disabled
+  ansible.builtin.file:
+    path: "/etc/logrotate.d/{{ headscale_admin_service_name }}"
+    state: absent
+  when: not (headscale_admin_logrotate_enabled | bool) or headscale_admin_log_output == "stdout"
+
+- name: Enable and start headscale-admin
+  ansible.builtin.systemd:
+    name: "{{ headscale_admin_service_name }}"
+    enabled: true
+    state: started
+    daemon_reload: true
+  when: not ansible_check_mode

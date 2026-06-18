@@ -1,0 +1,23 @@
+---
+galaxy_info:
+  role_name: headscale_admin
+  author: YouSysAdmin
+  description: >-
+    Install and configure headscale-admin (the admin UI that also supervises a
+    managed headscale). headscale-admin downloads and runs headscale itself;
+    this role only installs the headscale-admin binary, writes its config and
+    can optionally pre-seed the managed headscale.yaml.
+  company: YouSysAdmin
+
+  license: MIT
+
+  min_ansible_version: "2.12"
+
+  galaxy_tags:
+    - headscale
+    - tailscale
+    - vpn
+
+# Only required when headscale_admin_install_source == "s3".
+# Install with: ansible-galaxy collection install amazon.aws
+dependencies: []
